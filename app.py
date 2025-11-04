@@ -71,29 +71,30 @@ def yoy_compare(df, key_cols, value_col, period_col, gran: str):
 @st.cache_data(show_spinner=False)
 def read_any(path_or_buf, name_hint=""):
     nm = str(name_hint or getattr(path_or_buf, "name", "")).lower()
+    # Parquet (가장 빠름)
     if nm.endswith(".parquet"):
         return pd.read_parquet(path_or_buf)
+
+    # CSV (빠른 파라미터)
     if nm.endswith(".csv"):
-        for enc in ["utf-8-sig","cp949","euc-kr","utf-8"]:
+        for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
             try:
-                return pd.read_csv(path_or_buf, encoding=enc)
+                return pd.read_csv(
+                    path_or_buf,
+                    encoding=enc,
+                    low_memory=False,     # 타입 추론 병목 줄이기
+                    on_bad_lines="skip"   # 깨진 라인 스킵
+                )
             except Exception:
                 pass
-        return pd.read_csv(path_or_buf, encoding_errors="ignore")
+        return pd.read_csv(path_or_buf, encoding_errors="ignore",
+                           low_memory=False, on_bad_lines="skip")
+
+    # Excel (openpyxl 고정으로 불필요한 엔진 탐색 제거)
     try:
-        return pd.read_excel(path_or_buf)
-    except Exception:
         return pd.read_excel(path_or_buf, engine="openpyxl")
-
-def find_first(names):
-    for n in names:
-        if os.path.exists(n): return n
-    return None
-
-def list_existing(patterns):
-    out=[]
-    for pat in patterns: out+=glob.glob(pat)
-    return sorted(set(out))
+    except Exception:
+        return pd.read_excel(path_or_buf)
 
 # ───────────── 사이드바 업로드 ─────────────
 st.sidebar.header("① 데이터 업로드")
