@@ -1,7 +1,5 @@
-# app.py — Gas Sales Analytics (Landing: Usage-by-Year Stacked Bar)
-# 1) 첫 화면: 용도별 연간 누적 스택형 막대그래프 + 표
-# 2) 월/분기/반기/연간 집계(주택용/산업용)
-# 3) 산업용 업종 히트맵(셀 클릭 → 고객리스트/전년대비)
+# app.py — Gas Sales Analytics (Landing + Aggregations + Industrial Focus)
+# - 탭3: [산업용 집중분석] 업종×기간 히트맵 → 셀 클릭: 고객 Top-N / YoY / 다운로드
 
 import os, glob
 import numpy as np
@@ -13,9 +11,7 @@ from streamlit_plotly_events import plotly_events
 st.set_page_config(page_title="도시가스 판매량 분석", layout="wide")
 FONT = "Noto Sans KR, Pretendard, Arial, sans-serif"
 
-# ─────────────────────────────────────────
-# 공통 유틸
-# ─────────────────────────────────────────
+# ───────────── 공통 유틸 ─────────────
 def to_num(x):
     if isinstance(x, str): x = x.replace(",", "")
     return pd.to_numeric(x, errors="coerce")
@@ -48,7 +44,6 @@ def yoy_compare(df, key_cols, value_col, period_col, prev_map):
         prev = ( (prev_idx//2)+base ).astype(str) + np.where((prev_idx%2)==0,"H1","H2")
     else:
         prev = (p.astype(int)-1).astype(str)
-
     cur = df.copy(); cur["_prev"] = prev
     a = cur.groupby(key_cols+[period_col], as_index=False)[value_col].sum()
     b = cur.rename(columns={period_col:"_prev"}).groupby(key_cols+["_prev"], as_index=False)[value_col].sum().rename(columns={value_col:"전년동기"})
@@ -58,9 +53,6 @@ def yoy_compare(df, key_cols, value_col, period_col, prev_map):
     out["YoY(%)"] = np.where(out["전년동기"].abs()>1e-9, out["증감"]/out["전년동기"]*100, np.nan)
     return out
 
-# ─────────────────────────────────────────
-# 리포지토리/업로드 로더
-# ─────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def read_excel_any(path_or_buf):
     try: return pd.read_excel(path_or_buf)
@@ -83,23 +75,22 @@ def list_existing(patterns):
     for pat in patterns: out+=glob.glob(pat)
     return sorted(set(out))
 
-# ─────────────────────────────────────────
-# 사이드바 입력
-# ─────────────────────────────────────────
+# ───────────── 데이터 입력(사이드바) ─────────────
 st.sidebar.header("① 데이터 업로드")
 st.sidebar.caption("A: 월별 총괄(주택/산업 합산), B: 산업용 상세(고객/업종)")
 
 up_overall = st.sidebar.file_uploader("A) 월별 총괄 엑셀(.xlsx)", type=["xlsx"])
-used_overall = None
 if up_overall:
-    overall_raw = read_excel_any(up_overall); used_overall = up_overall.name
+    overall_raw = read_excel_any(up_overall)
+    used_overall = up_overall.name
 else:
     used_overall = find_first(["상품별판매량.xlsx","월별총괄.xlsx","overall.xlsx"])
     if used_overall:
         overall_raw = read_excel_any(used_overall)
-        st.info(f"리포지토리 기본 파일 사용: **{used_overall}**")
+        st.sidebar.info(f"A 자동 사용: **{used_overall}**")
     else:
-        st.warning("A(월별 총괄)를 업로드하거나 `상품별판매량.xlsx`를 저장소에 넣어줘."); st.stop()
+        st.info("A(월별 총괄)를 업로드하거나 `상품별판매량.xlsx`를 저장소에 넣어줘.")
+        st.stop()
 
 colsA = overall_raw.columns.astype(str).tolist()
 st.sidebar.header("② A(월별 총괄) 컬럼 매핑")
@@ -116,7 +107,6 @@ c_cenh   = st.sidebar.selectbox("중앙난방", colsA, index=colsA.index(_pickA(
 c_self   = st.sidebar.selectbox("자가열전용", colsA, index=colsA.index(_pickA(["자가열전용","자가열"])) if _pickA(["자가열전용","자가열"]) in colsA else 4)
 c_indusA = st.sidebar.selectbox("산업용 합계", colsA, index=colsA.index(_pickA(["산업용"])) if _pickA(["산업용"]) in colsA else 5)
 
-# 추가 용도(있으면 자동 포함)
 CAND_EXTRA = ["수송용","업무용","연료전지용","열전용설비용","열병합용","일반용"]
 extra_present = [c for c in CAND_EXTRA if c in colsA]
 extra_selects = {}
@@ -125,7 +115,6 @@ if extra_present:
     for nm in extra_present:
         extra_selects[nm] = st.sidebar.selectbox(nm, colsA, index=colsA.index(nm))
 
-# 정제
 overall = overall_raw.copy()
 overall["날짜"] = pd.to_datetime(overall[c_date], errors="coerce")
 overall["취사용"] = overall[c_cook].apply(to_num)
@@ -137,7 +126,6 @@ overall["주택용"] = overall[["취사용","개별난방","중앙난방","자�
 for nm, col in extra_selects.items():
     overall[nm] = overall[col].apply(to_num)
 
-# 산업용 상세(히트맵/고객리스트 용)
 up_indetail = st.sidebar.file_uploader("B) 산업용 상세 — CSV/XLSX 여러 개 업로드 가능", type=["csv","xlsx","xls"], accept_multiple_files=True)
 used_inds = []
 if up_indetail:
@@ -158,7 +146,7 @@ else:
             df = read_csv_any(p) if p.lower().endswith(".csv") else read_excel_any(p)
             frames.append(df)
         indetail_raw = pd.concat(frames, ignore_index=True)
-        st.info("리포지토리 산업용 상세 자동 병합: " + ", ".join(used_inds[:6]) + (" …" if len(used_inds)>6 else ""))
+        st.sidebar.info("B 자동 병합: " + ", ".join(used_inds[:6]) + (" …" if len(used_inds)>6 else ""))
     else:
         indetail_raw = pd.DataFrame(columns=["청구년월","용도","업종","고객명","사용량"])
 
@@ -193,79 +181,67 @@ if len(colsB)>0:
 else:
     indetail = pd.DataFrame(columns=["날짜","용도","업종","고객명","사용량"])
 
-# ─────────────────────────────────────────
-# 범위/필터
-# ─────────────────────────────────────────
+# ───────────── 범위/단위 ─────────────
 st.title("📊 도시가스 판매량 분석 — 월/분기/반기/연간 + 산업용 업종/고객")
-
 date_min = min(overall["날짜"].min(), indetail["날짜"].min()) if len(indetail)>0 else overall["날짜"].min()
 date_max = max(overall["날짜"].max(), indetail["날짜"].max()) if len(indetail)>0 else overall["날짜"].max()
 d1, d2 = st.sidebar.date_input("기간", [pd.to_datetime(date_min), pd.to_datetime(date_max)])
 
-# ─────────────────────────────────────────
-# 0) 랜딩: 용도별 연간 누적 스택형 막대
-# ─────────────────────────────────────────
-st.subheader("0) 실적 — **연도 × 용도** (스택형)")
-landing = overall[(overall["날짜"]>=pd.to_datetime(d1)) & (overall["날짜"]<=pd.to_datetime(d2))].copy()
-landing["연도"] = landing["날짜"].dt.year
+# ───────────── 탭 구성 ─────────────
+tab0, tab1, tab2 = st.tabs(["🏠 대시보드","📚 집계","🏭 산업용 집중분석"])
 
-# 사용될 용도 컬럼 구성
-usage_cols = ["주택용","산업용"] + [c for c in CAND_EXTRA if c in overall.columns]
-annual = landing.groupby("연도", as_index=False)[usage_cols].sum().sort_values("연도")
+# ── 탭0: 랜딩(연도×용도 스택) ──
+with tab0:
+    st.subheader("연도별 용도 누적 스택")
+    landing = overall[(overall["날짜"]>=pd.to_datetime(d1)) & (overall["날짜"]<=pd.to_datetime(d2))].copy()
+    landing["연도"] = landing["날짜"].dt.year
+    usage_cols = ["주택용","산업용"] + [c for c in CAND_EXTRA if c in overall.columns]
+    annual = landing.groupby("연도", as_index=False)[usage_cols].sum().sort_values("연도")
+    fig0 = go.Figure()
+    for col in usage_cols:
+        fig0.add_trace(go.Bar(x=annual["연도"], y=annual[col], name=col))
+    fig0.update_layout(barmode="stack", template="simple_white", height=420,
+                       xaxis=dict(title="Year"), yaxis=dict(title="사용량"),
+                       font=dict(family=FONT, size=13),
+                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    st.plotly_chart(fig0, use_container_width=True, config={"displaylogo": False})
+    st.dataframe(annual.set_index("연도").style.format("{:,.0f}"), use_container_width=True)
 
-# 그래프
-fig0 = go.Figure()
-for col in usage_cols:
-    fig0.add_trace(go.Bar(x=annual["연도"], y=annual[col], name=col, textposition="none"))
-fig0.update_layout(
-    barmode="stack", template="simple_white", height=420,
-    xaxis=dict(title="Year"),
-    yaxis=dict(title="사용량"),
-    font=dict(family=FONT, size=13),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
-)
-st.plotly_chart(fig0, use_container_width=True, config={"displaylogo": False})
-
-# 표(피벗 형태)
-disp = annual.set_index("연도")
-st.dataframe(disp.style.format("{:,.0f}"), use_container_width=True)
-
-st.divider()
-
-# ─────────────────────────────────────────
-# 1) 월/분기/반기/연간 집계 (주택용/산업용)
-# ─────────────────────────────────────────
-st.subheader("1) 집계 — 월/분기/반기/연간 (주택용 / 산업용)")
-gran = st.sidebar.radio("집계 단위", ["월","분기","반기","연간"], horizontal=True, key="granularity")
-
-A = overall[(overall["날짜"]>=pd.to_datetime(d1)) & (overall["날짜"]<=pd.to_datetime(d2))].copy()
-A["Period"] = as_period_key(A["날짜"], gran)
-sum_tbl = A.groupby("Period", as_index=False)[["주택용","산업용"]].sum().sort_values("Period")
-
-c1,c2 = st.columns([2,3])
-with c1:
-    st.dataframe(sum_tbl.style.format({"주택용":"{:,.0f}","산업용":"{:,.0f}"}), use_container_width=True)
-with c2:
-    fig_sum = go.Figure()
-    fig_sum.add_trace(go.Bar(x=sum_tbl["Period"], y=sum_tbl["주택용"], name="주택용"))
-    fig_sum.add_trace(go.Bar(x=sum_tbl["Period"], y=sum_tbl["산업용"], name="산업용"))
-    fig_sum.update_layout(barmode="group", template="simple_white", height=360,
+# ── 탭1: 집계(월/분기/반기/연간) ──
+with tab1:
+    st.subheader("집계 — 월/분기/반기/연간 (주택용 / 산업용)")
+    gran = st.radio("집계 단위", ["월","분기","반기","연간"], horizontal=True, key="granularity")
+    A = overall[(overall["날짜"]>=pd.to_datetime(d1)) & (overall["날짜"]<=pd.to_datetime(d2))].copy()
+    A["Period"] = as_period_key(A["날짜"], gran)
+    sum_tbl = A.groupby("Period", as_index=False)[["주택용","산업용"]].sum().sort_values("Period")
+    left, right = st.columns([2,3])
+    with left:
+        st.dataframe(sum_tbl.style.format({"주택용":"{:,.0f}","산업용":"{:,.0f}"}), use_container_width=True)
+    with right:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=sum_tbl["Period"], y=sum_tbl["주택용"], name="주택용"))
+        fig.add_trace(go.Bar(x=sum_tbl["Period"], y=sum_tbl["산업용"], name="산업용"))
+        fig.update_layout(barmode="group", template="simple_white", height=360,
                           xaxis=dict(title="Period"), yaxis=dict(title="사용량"),
                           font=dict(family=FONT, size=13))
-    st.plotly_chart(fig_sum, use_container_width=True, config={"displaylogo": False})
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
-st.divider()
+# ── 탭2: 산업용 집중분석 ──
+with tab2:
+    st.subheader("산업용 집중분석 — 업종 히트맵 → 고객 Top-N")
+    if len(indetail)==0:
+        st.info("산업용 상세 파일(B)이 없어 히트맵을 표시할 수 없어.")
+        st.stop()
 
-# ─────────────────────────────────────────
-# 2) 산업용 — 업종 히트맵 → 고객 리스트
-# ─────────────────────────────────────────
-st.subheader("2) 산업용 — 업종 히트맵  →  클릭 시 고객리스트(상위/전년대비)")
-if len(indetail)==0:
-    st.info("산업용 상세 파일이 없어서 히트맵을 생략했어. B 데이터를 추가하면 바로 동작해.")
-else:
+    gran_focus = st.radio("기간 단위", ["월","분기","반기","연간"], horizontal=True, key="gran_focus")
     B = indetail[(indetail["날짜"]>=pd.to_datetime(d1)) & (indetail["날짜"]<=pd.to_datetime(d2))].copy()
-    B["Period"] = as_period_key(B["날짜"], gran)
+    # 산업용만 필터(파일에 다른 용도가 섞여 있으면)
+    if "용도" in B.columns:
+        B = B[B["용도"].str.contains("산업", na=False)]
 
+    B["Period"] = as_period_key(B["날짜"], gran_focus)
+
+    # ① 히트맵(업종×기간)
     pivot = B.pivot_table(index="업종", columns="Period", values="사용량", aggfunc="sum").fillna(0)
     pivot = pivot[pivot.columns.sort_values()].sort_index()
     Z = pivot.values; X = pivot.columns.tolist(); Y = pivot.index.tolist()
@@ -275,37 +251,52 @@ else:
         z=Z, x=X, y=Y, colorscale="Blues", zmid=zmid, colorbar=dict(title="사용량"),
         hovertemplate="업종=%{y}<br>기간=%{x}<br>사용량=%{z:,.0f}<extra></extra>"
     ))
-    heat.update_layout(template="simple_white", height=520,
+    heat.update_layout(template="simple_white", height=560,
                        xaxis=dict(title="Period"), yaxis=dict(title="업종"),
-                       font=dict(family=FONT, size=13), margin=dict(l=60,r=20,t=40,b=40))
+                       font=dict(family=FONT, size=13), margin=dict(l=70,r=20,t=40,b=40))
     clicked = plotly_events(heat, click_event=True, hover_event=False, select_event=False,
-                            override_height=520, override_width="100%")
-    colL, colR = st.columns([1.0,1.4])
-    with colR:
-        if clicked:
-            c = clicked[0]
-            sel_period = X[c["x"]]; sel_ind = Y[c["y"]]
-            st.markdown(f"**선택 업종:** `{sel_ind}` · **선택 기간:** `{sel_period}`")
+                            override_height=560, override_width="100%")
 
-            prev_map={"월":12,"분기":4,"반기":2,"연간":1}
-            yo = yoy_compare(B[B["업종"]==sel_ind], ["업종","고객명"], "사용량", "Period", prev_map)
-            yo_sel = yo[yo["Period"]==sel_period].copy().sort_values("사용량", ascending=False)
+    # ② 클릭 후: 고객 Top-N + 막대그래프
+    if clicked:
+        c = clicked[0]
+        sel_period = X[c["x"]]; sel_ind = Y[c["y"]]
+        st.markdown(f"**선택 업종:** `{sel_ind}` · **선택 기간:** `{sel_period}`")
 
-            yo_sel["사용량"]=yo_sel["사용량"].round(0); yo_sel["전년동기"]=yo_sel["전년동기"].round(0)
-            yo_sel["증감"]=yo_sel["증감"].round(0); yo_sel["YoY(%)"]=yo_sel["YoY(%)"].round(1)
+        prev_map={"월":12,"분기":4,"반기":2,"연간":1}
+        yo = yoy_compare(B[B["업종"]==sel_ind], ["업종","고객명"], "사용량", "Period", prev_map)
+        yo_sel = yo[yo["Period"]==sel_period].copy().sort_values("사용량", ascending=False)
 
-            top_n = st.selectbox("상위 N", [10,20,50,100], index=1)
-            view = yo_sel.head(top_n)[["고객명","사용량","전년동기","증감","YoY(%)"]].reset_index(drop=True)
+        yo_sel["사용량"]=yo_sel["사용량"].round(0)
+        yo_sel["전년동기"]=yo_sel["전년동기"].round(0)
+        yo_sel["증감"]=yo_sel["증감"].round(0)
+        yo_sel["YoY(%)"]=yo_sel["YoY(%)"].round(1)
+
+        top_n = st.slider("상위 N", 5, 100, 20, step=5)
+        view = yo_sel.head(top_n)[["고객명","사용량","전년동기","증감","YoY(%)"]].reset_index(drop=True)
+
+        g1, g2 = st.columns([1.4,1.6])
+        with g1:
             st.dataframe(view.style.format({"사용량":"{:,.0f}","전년동기":"{:,.0f}","증감":"{:+,.0f}","YoY(%)":"{:+,.1f}"}),
                          use_container_width=True, height=520)
-            st.download_button("⬇️ 고객리스트 CSV", data=view.to_csv(index=False).encode("utf-8-sig"),
-                               file_name=f"{sel_ind}_{sel_period}_top{top_n}.csv", mime="text/csv")
-        else:
-            st.info("히트맵 셀을 클릭하면 고객 리스트가 표시돼.")
+            st.download_button("⬇️ 고객리스트 CSV",
+                               data=view.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"{sel_ind}_{sel_period}_top{top_n}.csv",
+                               mime="text/csv")
+        with g2:
+            fig_bar = go.Figure()
+            fig_bar.add_trace(go.Bar(
+                x=view["고객명"], y=view["사용량"], name="사용량",
+                text=[f"{v:,.0f}" for v in view["사용량"]], textposition="auto"))
+            fig_bar.update_layout(template="simple_white", height=520,
+                                  xaxis=dict(title="고객명", tickangle=-45),
+                                  yaxis=dict(title="사용량"),
+                                  font=dict(family=FONT, size=12), margin=dict(l=40,r=20,t=10,b=120))
+            st.plotly_chart(fig_bar, use_container_width=True, config={"displaylogo": False})
+    else:
+        st.info("히트맵 셀을 클릭하면 아래에 고객 Top-N과 막대그래프가 표시돼.")
 
-# ─────────────────────────────────────────
-# 사용 파일 확인
-# ─────────────────────────────────────────
+# ───────────── 사용 파일 확인 ─────────────
 with st.expander("🔎 분석에 사용된 원천 파일"):
     if used_overall: st.write(f"A(월별 총괄): **{used_overall}**")
-    if used_inds: st.write("B(산업용 상세): " + ", ".join(used_inds[:8]) + (" …" if len(used_inds)>8 else ""))
+    if used_inds: st.write("B(산업용 상세): " + ", ".join(used_inds[:10]) + (" …" if len(used_inds)>10 else ""))
