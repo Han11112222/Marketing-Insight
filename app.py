@@ -11,68 +11,98 @@ from streamlit_plotly_events import plotly_events
 st.set_page_config(page_title="도시가스 판매량 분석", layout="wide")
 FONT = "Noto Sans KR, Pretendard, Arial, sans-serif"
 
+# 추가 용도(대시보드 첫 화면에 있으면 함께 스택으로 표시)
+CAND_EXTRA = [
+    "수송용", "업무용", "연료전지용", "열전용설비용",
+    "열병합용", "열병합용1", "열병합용2",
+    "일반용", "일반용(1)", "일반용(2)"
+]
+
 # ───────────── 공통 유틸 ─────────────
 def to_num(x):
-    if isinstance(x, str): x = x.replace(",", "")
+    if isinstance(x, str):
+        x = x.replace(",", "")
     return pd.to_numeric(x, errors="coerce")
 
 def as_period_key(dt: pd.Series, gran: str) -> pd.Series:
     d = pd.to_datetime(dt)
     if gran == "월":
-        return d.dt.to_period("M").astype(str)
+        return d.dt.to_period("M").astype(str)          # e.g., '2025-09'
     elif gran == "분기":
-        return d.dt.to_period("Q").astype(str)
+        return d.dt.to_period("Q").astype(str)          # e.g., '2025Q3'
     elif gran == "반기":
-        y = d.dt.year
-        h = np.where(d.dt.month<=6, "H1", "H2")
-        return (y.astype(str)+h)
+        y = d.dt.year.astype(str)
+        h = np.where(d.dt.month <= 6, "H1", "H2")
+        return (y + h)                                  # e.g., '2025H1'
     else:
-        return d.dt.year.astype(str)
+        return d.dt.year.astype(str)                    # e.g., '2025'
 
-def yoy_compare(df, key_cols, value_col, period_col, prev_map):
-    gran = st.session_state.get("granularity","월")
-    lag = prev_map.get(gran,12)
+def yoy_compare(df, key_cols, value_col, period_col, gran: str):
+    """
+    gran(월/분기/반기/연간)에 맞춰 '전년동기'를 계산해 고객 Top 등 비교표 생성
+    """
+    # gran별 lag
+    lag_map = {"월": 12, "분기": 4, "반기": 2, "연간": 1}
+    lag = lag_map.get(gran, 12)
+
     p = df[period_col].astype(str)
-    if gran in ["월","분기"]:
+
+    if gran in ["월", "분기"]:
+        # '2025-09' 또는 '2025Q3' 같은 pandas Period 호환 포맷
         prev = (pd.PeriodIndex(p) - lag).astype(str)
-    elif gran=="반기":
+    elif gran == "반기":
+        # 'YYYYH1/H2' 커스텀 처리
         y = p.str[:4].astype(int)
-        h = p.str[-2:].map({"H1":1,"H2":2}).astype(int)
-        idx = (y-y.min())*2 + (h-1)
-        prev_idx = idx-2
+        h = p.str[-2:].map({"H1": 1, "H2": 2}).astype(int)
+        idx = (y - y.min()) * 2 + (h - 1)
+        prev_idx = idx - 2
         base = y.min()
-        prev = ( (prev_idx//2)+base ).astype(str) + np.where((prev_idx%2)==0,"H1","H2")
-    else:
-        prev = (p.astype(int)-1).astype(str)
-    cur = df.copy(); cur["_prev"] = prev
-    a = cur.groupby(key_cols+[period_col], as_index=False)[value_col].sum()
-    b = cur.rename(columns={period_col:"_prev"}).groupby(key_cols+["_prev"], as_index=False)[value_col].sum().rename(columns={value_col:"전년동기"})
-    out = pd.merge(a,b, how="left", left_on=key_cols+[period_col], right_on=key_cols+["_prev"])
+        prev = ((prev_idx // 2) + base).astype(str) + np.where((prev_idx % 2) == 0, "H1", "H2")
+    else:  # 연간
+        prev = (p.astype(int) - 1).astype(str)
+
+    cur = df.copy()
+    cur["_prev"] = prev
+
+    a = cur.groupby(key_cols + [period_col], as_index=False)[value_col].sum()
+    b = (
+        cur.rename(columns={period_col: "_prev"})
+        .groupby(key_cols + ["_prev"], as_index=False)[value_col]
+        .sum()
+        .rename(columns={value_col: "전년동기"})
+    )
+    out = pd.merge(a, b, how="left", left_on=key_cols + [period_col], right_on=key_cols + ["_prev"])
     out.drop(columns=["_prev"], inplace=True, errors="ignore")
-    out["증감"] = out[value_col]-out["전년동기"]
-    out["YoY(%)"] = np.where(out["전년동기"].abs()>1e-9, out["증감"]/out["전년동기"]*100, np.nan)
+    out["증감"] = out[value_col] - out["전년동기"]
+    out["YoY(%)"] = np.where(out["전년동기"].abs() > 1e-9, out["증감"] / out["전년동기"] * 100, np.nan)
     return out
 
 @st.cache_data(show_spinner=False)
 def read_excel_any(path_or_buf):
-    try: return pd.read_excel(path_or_buf)
-    except: return pd.read_excel(path_or_buf, engine="openpyxl")
+    try:
+        return pd.read_excel(path_or_buf)
+    except Exception:
+        return pd.read_excel(path_or_buf, engine="openpyxl")
 
 @st.cache_data(show_spinner=False)
 def read_csv_any(path):
-    for enc in ["cp949","euc-kr","utf-8-sig","utf-8"]:
-        try: return pd.read_csv(path, encoding=enc)
-        except: pass
+    for enc in ["cp949", "euc-kr", "utf-8-sig", "utf-8"]:
+        try:
+            return pd.read_csv(path, encoding=enc)
+        except Exception:
+            pass
     return pd.read_csv(path, encoding_errors="ignore")
 
 def find_first(cands):
     for p in cands:
-        if os.path.exists(p): return p
+        if os.path.exists(p):
+            return p
     return None
 
 def list_existing(patterns):
-    out=[]
-    for pat in patterns: out+=glob.glob(pat)
+    out = []
+    for pat in patterns:
+        out += glob.glob(pat)
     return sorted(set(out))
 
 # ───────────── 데이터 입력(사이드바) ─────────────
@@ -84,7 +114,7 @@ if up_overall:
     overall_raw = read_excel_any(up_overall)
     used_overall = up_overall.name
 else:
-    used_overall = find_first(["상품별판매량.xlsx","월별총괄.xlsx","overall.xlsx"])
+    used_overall = find_first(["상품별판매량.xlsx", "월별총괄.xlsx", "overall.xlsx"])
     if used_overall:
         overall_raw = read_excel_any(used_overall)
         st.sidebar.info(f"A 자동 사용: **{used_overall}**")
@@ -97,7 +127,8 @@ st.sidebar.header("② A(월별 총괄) 컬럼 매핑")
 def _pickA(keys, default_idx=0):
     for k in keys:
         for c in colsA:
-            if k in c: return c
+            if k in c:
+                return c
     return colsA[default_idx]
 
 c_date   = st.sidebar.selectbox("날짜", colsA, index=colsA.index(_pickA(["날짜","Date","월"])) if _pickA(["날짜","Date","월"]) in colsA else 0)
@@ -107,7 +138,6 @@ c_cenh   = st.sidebar.selectbox("중앙난방", colsA, index=colsA.index(_pickA(
 c_self   = st.sidebar.selectbox("자가열전용", colsA, index=colsA.index(_pickA(["자가열전용","자가열"])) if _pickA(["자가열전용","자가열"]) in colsA else 4)
 c_indusA = st.sidebar.selectbox("산업용 합계", colsA, index=colsA.index(_pickA(["산업용"])) if _pickA(["산업용"]) in colsA else 5)
 
-CAND_EXTRA = ["수송용","업무용","연료전지용","열전용설비용","열병합용","일반용"]
 extra_present = [c for c in CAND_EXTRA if c in colsA]
 extra_selects = {}
 if extra_present:
@@ -132,10 +162,12 @@ if up_indetail:
     frames=[]
     for f in up_indetail:
         used_inds.append(f.name)
-        if f.name.lower().endswith(".csv"): df=pd.read_csv(f, encoding="utf-8-sig")
-        else: df=pd.read_excel(f)
+        if f.name.lower().endswith(".csv"):
+            df = pd.read_csv(f, encoding="utf-8-sig")
+        else:
+            df = pd.read_excel(f)
         frames.append(df)
-    indetail_raw = pd.concat(frames, ignore_index=True)
+    indetail_raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 else:
     pats = ["가정용외_*.csv","가정용외_*.xlsx","가정용외_*.xls"]
     files = list_existing(pats)
@@ -145,7 +177,7 @@ else:
         for p in files:
             df = read_csv_any(p) if p.lower().endswith(".csv") else read_excel_any(p)
             frames.append(df)
-        indetail_raw = pd.concat(frames, ignore_index=True)
+        indetail_raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         st.sidebar.info("B 자동 병합: " + ", ".join(used_inds[:6]) + (" …" if len(used_inds)>6 else ""))
     else:
         indetail_raw = pd.DataFrame(columns=["청구년월","용도","업종","고객명","사용량"])
@@ -155,7 +187,8 @@ st.sidebar.header("③ B(산업용 상세) 컬럼 매핑")
 def _pickB(keys, default=None):
     for k in keys:
         for c in colsB:
-            if k in c: return c
+            if k in c:
+                return c
     return default if default else (colsB[0] if colsB else None)
 
 b_date = st.sidebar.selectbox("날짜(월)", colsB, index=(colsB.index(_pickB(["청구년월","사용월","년월"])) if _pickB(["청구년월","사용월","년월"]) in colsB else 0)) if len(colsB)>0 else None
@@ -165,10 +198,12 @@ b_cus  = st.sidebar.selectbox("고객명", colsB, index=(colsB.index(_pickB(["�
 b_amt  = st.sidebar.selectbox("사용량 열", colsB, index=(colsB.index(_pickB(["사용량(m3","m3사용량","사용량","수량","NM3","Nm3","MJ"])) if _pickB(["사용량(m3","m3사용량","사용량","수량","NM3","Nm3","MJ"]) in colsB else 0)) if len(colsB)>0 else None
 
 def parse_month(x):
-    s=str(x)
+    s = str(x)
     for fmt in ["%Y-%m","%Y/%m","%Y%m","%Y.%m","%Y-%m-%d","%Y/%m/%d"]:
-        try: return pd.to_datetime(s, format=fmt).replace(day=1)
-        except: pass
+        try:
+            return pd.to_datetime(s, format=fmt).replace(day=1)
+        except Exception:
+            pass
     return pd.to_datetime(s, errors="coerce")
 
 if len(colsB)>0:
@@ -200,10 +235,12 @@ with tab0:
     fig0 = go.Figure()
     for col in usage_cols:
         fig0.add_trace(go.Bar(x=annual["연도"], y=annual[col], name=col))
-    fig0.update_layout(barmode="stack", template="simple_white", height=420,
-                       xaxis=dict(title="Year"), yaxis=dict(title="사용량"),
-                       font=dict(family=FONT, size=13),
-                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    fig0.update_layout(
+        barmode="stack", template="simple_white", height=420,
+        xaxis=dict(title="Year"), yaxis=dict(title="사용량"),
+        font=dict(family=FONT, size=13),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
+    )
     st.plotly_chart(fig0, use_container_width=True, config={"displaylogo": False})
     st.dataframe(annual.set_index("연도").style.format("{:,.0f}"), use_container_width=True)
 
@@ -221,82 +258,105 @@ with tab1:
         fig = go.Figure()
         fig.add_trace(go.Bar(x=sum_tbl["Period"], y=sum_tbl["주택용"], name="주택용"))
         fig.add_trace(go.Bar(x=sum_tbl["Period"], y=sum_tbl["산업용"], name="산업용"))
-        fig.update_layout(barmode="group", template="simple_white", height=360,
-                          xaxis=dict(title="Period"), yaxis=dict(title="사용량"),
-                          font=dict(family=FONT, size=13))
+        fig.update_layout(
+            barmode="group", template="simple_white", height=360,
+            xaxis=dict(title="Period"), yaxis=dict(title="사용량"),
+            font=dict(family=FONT, size=13)
+        )
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
 # ── 탭2: 산업용 집중분석 ──
 with tab2:
     st.subheader("산업용 집중분석 — 업종 히트맵 → 고객 Top-N")
-    if len(indetail)==0:
+    if len(indetail) == 0:
         st.info("산업용 상세 파일(B)이 없어 히트맵을 표시할 수 없어.")
         st.stop()
 
     gran_focus = st.radio("기간 단위", ["월","분기","반기","연간"], horizontal=True, key="gran_focus")
     B = indetail[(indetail["날짜"]>=pd.to_datetime(d1)) & (indetail["날짜"]<=pd.to_datetime(d2))].copy()
+
     # 산업용만 필터(파일에 다른 용도가 섞여 있으면)
     if "용도" in B.columns:
-        B = B[B["용도"].str.contains("산업", na=False)]
+        B = B[B["용도"].astype(str).str.contains("산업", na=False)]
+
+    if len(B) == 0:
+        st.info("선택한 기간/필터에 산업용 데이터가 없어.")
+        st.stop()
 
     B["Period"] = as_period_key(B["날짜"], gran_focus)
 
     # ① 히트맵(업종×기간)
     pivot = B.pivot_table(index="업종", columns="Period", values="사용량", aggfunc="sum").fillna(0)
     pivot = pivot[pivot.columns.sort_values()].sort_index()
-    Z = pivot.values; X = pivot.columns.tolist(); Y = pivot.index.tolist()
+    Z = pivot.values
+    X = pivot.columns.tolist()
+    Y = pivot.index.tolist()
     zmid = float(np.nanmean(Z)) if np.isfinite(Z).all() else None
 
     heat = go.Figure(data=go.Heatmap(
         z=Z, x=X, y=Y, colorscale="Blues", zmid=zmid, colorbar=dict(title="사용량"),
         hovertemplate="업종=%{y}<br>기간=%{x}<br>사용량=%{z:,.0f}<extra></extra>"
     ))
-    heat.update_layout(template="simple_white", height=560,
-                       xaxis=dict(title="Period"), yaxis=dict(title="업종"),
-                       font=dict(family=FONT, size=13), margin=dict(l=70,r=20,t=40,b=40))
-    clicked = plotly_events(heat, click_event=True, hover_event=False, select_event=False,
-                            override_height=560, override_width="100%")
+    heat.update_layout(
+        template="simple_white", height=560,
+        xaxis=dict(title="Period"), yaxis=dict(title="업종"),
+        font=dict(family=FONT, size=13), margin=dict(l=70, r=20, t=40, b=40)
+    )
+    clicked = plotly_events(
+        heat, click_event=True, hover_event=False, select_event=False,
+        override_height=560, override_width="100%"
+    )
 
     # ② 클릭 후: 고객 Top-N + 막대그래프
     if clicked:
         c = clicked[0]
-        sel_period = X[c["x"]]; sel_ind = Y[c["y"]]
+        sel_period = str(c.get("x"))    # 라벨 값 그대로 사용
+        sel_ind    = str(c.get("y"))
         st.markdown(f"**선택 업종:** `{sel_ind}` · **선택 기간:** `{sel_period}`")
 
-        prev_map={"월":12,"분기":4,"반기":2,"연간":1}
-        yo = yoy_compare(B[B["업종"]==sel_ind], ["업종","고객명"], "사용량", "Period", prev_map)
-        yo_sel = yo[yo["Period"]==sel_period].copy().sort_values("사용량", ascending=False)
+        yo = yoy_compare(B[B["업종"] == sel_ind], ["업종", "고객명"], "사용량", "Period", gran_focus)
+        yo_sel = yo[yo["Period"] == sel_period].copy().sort_values("사용량", ascending=False)
 
-        yo_sel["사용량"]=yo_sel["사용량"].round(0)
-        yo_sel["전년동기"]=yo_sel["전년동기"].round(0)
-        yo_sel["증감"]=yo_sel["증감"].round(0)
-        yo_sel["YoY(%)"]=yo_sel["YoY(%)"].round(1)
+        yo_sel["사용량"]   = yo_sel["사용량"].round(0)
+        yo_sel["전년동기"] = yo_sel["전년동기"].round(0)
+        yo_sel["증감"]     = yo_sel["증감"].round(0)
+        yo_sel["YoY(%)"]  = yo_sel["YoY(%)"].round(1)
 
         top_n = st.slider("상위 N", 5, 100, 20, step=5)
         view = yo_sel.head(top_n)[["고객명","사용량","전년동기","증감","YoY(%)"]].reset_index(drop=True)
 
-        g1, g2 = st.columns([1.4,1.6])
+        g1, g2 = st.columns([1.4, 1.6])
         with g1:
-            st.dataframe(view.style.format({"사용량":"{:,.0f}","전년동기":"{:,.0f}","증감":"{:+,.0f}","YoY(%)":"{:+,.1f}"}),
-                         use_container_width=True, height=520)
-            st.download_button("⬇️ 고객리스트 CSV",
-                               data=view.to_csv(index=False).encode("utf-8-sig"),
-                               file_name=f"{sel_ind}_{sel_period}_top{top_n}.csv",
-                               mime="text/csv")
+            st.dataframe(
+                view.style.format({"사용량":"{:,.0f}","전년동기":"{:,.0f}","증감":"{:+,.0f}","YoY(%)":"{:+,.1f}"}),
+                use_container_width=True, height=520
+            )
+            st.download_button(
+                "⬇️ 고객리스트 CSV",
+                data=view.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"{sel_ind}_{sel_period}_top{top_n}.csv",
+                mime="text/csv"
+            )
         with g2:
             fig_bar = go.Figure()
             fig_bar.add_trace(go.Bar(
                 x=view["고객명"], y=view["사용량"], name="사용량",
-                text=[f"{v:,.0f}" for v in view["사용량"]], textposition="auto"))
-            fig_bar.update_layout(template="simple_white", height=520,
-                                  xaxis=dict(title="고객명", tickangle=-45),
-                                  yaxis=dict(title="사용량"),
-                                  font=dict(family=FONT, size=12), margin=dict(l=40,r=20,t=10,b=120))
+                text=[f"{v:,.0f}" for v in view["사용량"]], textposition="auto"
+            ))
+            fig_bar.update_layout(
+                template="simple_white", height=520,
+                xaxis=dict(title="고객명", tickangle=-45),
+                yaxis=dict(title="사용량"),
+                font=dict(family=FONT, size=12),
+                margin=dict(l=40, r=20, t=10, b=120)
+            )
             st.plotly_chart(fig_bar, use_container_width=True, config={"displaylogo": False})
     else:
         st.info("히트맵 셀을 클릭하면 아래에 고객 Top-N과 막대그래프가 표시돼.")
 
 # ───────────── 사용 파일 확인 ─────────────
 with st.expander("🔎 분석에 사용된 원천 파일"):
-    if used_overall: st.write(f"A(월별 총괄): **{used_overall}**")
-    if used_inds: st.write("B(산업용 상세): " + ", ".join(used_inds[:10]) + (" …" if len(used_inds)>10 else ""))
+    if used_overall:
+        st.write(f"A(월별 총괄): **{used_overall}**")
+    if used_inds:
+        st.write("B(산업용 상세): " + ", ".join(used_inds[:10]) + (" …" if len(used_inds) > 10 else ""))
