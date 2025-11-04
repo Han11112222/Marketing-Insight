@@ -226,48 +226,35 @@ indetail = build_indetail(indetail_raw)
 
 # ───────────── 범위/단위 ─────────────
 st.title("📊 도시가스 판매량 분석 — 월/분기/반기/연간 + 산업용 업종/고객")
-date_min = min(overall["날짜"].min(), indetail["날짜"].min()) if len(indetail)>0 else overall["날짜"].min()
-date_max = max(overall["날짜"].max(), indetail["날짜"].max()) if len(indetail)>0 else overall["날짜"].max()
-d1, d2 = st.sidebar.date_input("기간", [pd.to_datetime(date_min), pd.to_datetime(date_max)])
 
-# ───────────── 탭 구성 ─────────────
-tab0, tab1, tab2 = st.tabs(["🏠 대시보드","📚 집계","🏭 산업용 집중분석"])
+def _safe_minmax(series: pd.Series):
+    """NaT/결측 제거 후 (min, max) 반환. 모두 NaT면 오늘 기준 최근 24개월로."""
+    s = pd.to_datetime(series, errors="coerce").dropna()
+    if s.empty:
+        # 기본: 오늘 기준 최근 24개월
+        today = pd.Timestamp.today().normalize()
+        return (today - pd.DateOffset(months=24)).replace(day=1), today
+    return s.min(), s.max()
 
-# ── 탭0: 랜딩(연도×용도 스택) ──
-with tab0:
-    st.subheader("연도별 용도 누적 스택")
-    landing = overall[(overall["날짜"]>=pd.to_datetime(d1)) & (overall["날짜"]<=pd.to_datetime(d2))].copy()
-    landing["연도"] = landing["날짜"].dt.year
-    usage_cols = ["주택용","산업용"] + [c for c in CAND_EXTRA if c in overall.columns]
-    annual = landing.groupby("연도", as_index=False)[usage_cols].sum().sort_values("연도")
-    fig0 = go.Figure()
-    for col in usage_cols:
-        fig0.add_trace(go.Bar(x=annual["연도"], y=annual[col], name=col))
-    fig0.update_layout(barmode="stack", template="simple_white", height=420,
-                       xaxis=dict(title="Year"), yaxis=dict(title="사용량"),
-                       font=dict(family=FONT, size=13),
-                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-    st.plotly_chart(fig0, use_container_width=True, config={"displaylogo": False})
-    st.dataframe(annual.set_index("연도").style.format("{:,.0f}"), use_container_width=True)
+# A, B 각각에서 안전한 min/max 구한 뒤 전체 min/max
+a_min, a_max = _safe_minmax(overall["날짜"])
+if 'indetail' in locals() and len(indetail) > 0:
+    b_min, b_max = _safe_minmax(indetail["날짜"])
+    date_min = min(a_min, b_min)
+    date_max = max(a_max, b_max)
+else:
+    date_min, date_max = a_min, a_max
 
-# ── 탭1: 집계(월/분기/반기/연간) ──
-with tab1:
-    st.subheader("집계 — 월/분기/반기/연간 (주택용 / 산업용)")
-    gran = st.radio("집계 단위", ["월","분기","반기","연간"], horizontal=True, key="granularity")
-    A = overall[(overall["날짜"]>=pd.to_datetime(d1)) & (overall["날짜"]<=pd.to_datetime(d2))].copy()
-    A["Period"] = as_period_key(A["날짜"], gran)
-    sum_tbl = A.groupby("Period", as_index=False)[["주택용","산업용"]].sum().sort_values("Period")
-    left, right = st.columns([2,3])
-    with left:
-        st.dataframe(sum_tbl.style.format({"주택용":"{:,.0f}","산업용":"{:,.0f}"}), use_container_width=True)
-    with right:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=sum_tbl["Period"], y=sum_tbl["주택용"], name="주택용"))
-        fig.add_trace(go.Bar(x=sum_tbl["Period"], y=sum_tbl["산업용"], name="산업용"))
-        fig.update_layout(barmode="group", template="simple_white", height=360,
-                          xaxis=dict(title="Period"), yaxis=dict(title="사용량"),
-                          font=dict(family=FONT, size=13))
-        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+# min > max가 되는 상황 방지 (같으면 max에 +1일 버퍼)
+if pd.isna(date_min) or pd.isna(date_max) or date_min > date_max:
+    today = pd.Timestamp.today().normalize()
+    date_min = (today - pd.DateOffset(months=24)).replace(day=1)
+    date_max = today
+
+d1, d2 = st.sidebar.date_input(
+    "기간",
+    [pd.to_datetime(date_min), pd.to_datetime(date_max)]
+)
 
 # ── 탭2: 산업용 집중분석 ──
 with tab2:
