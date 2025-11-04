@@ -1,6 +1,4 @@
-streamlit==1.38.0
-pandas>=2.1
-numpy
-plotly>=5.22
-openpyxl
-streamlit-plotly-events
+streamlit
+pandas>=2.2
+pyarrow>=16.0
+plotly
