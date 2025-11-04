@@ -1,26 +1,28 @@
 # app.py — Gas Sales Analytics (Landing + Aggregations + Industrial Focus)
-# - 탭3: [산업용 집중분석] 업종×기간 히트맵 → 셀 클릭: 고객 Top-N / YoY / 다운로드
-# - 파일 읽기 최적화: read_any() 하나로 Parquet/CSV/Excel 자동 처리
+# - 빠른 로딩: 업로드 파일은 캐시 금지, 경로 파일만 캐시
+# - 탭3: 산업용 업종×기간 히트맵 → 셀 클릭(또는 드롭다운) → 고객 Top-N/YoY/다운로드
 
-import os, glob
+import os, io, glob
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-# plotly 클릭 이벤트(없으면 자동 우회)
+# plotly 클릭 이벤트(없으면 드롭다운 대체)
 try:
     from streamlit_plotly_events import plotly_events
     HAS_PLOTLY_EVENTS = True
 except Exception:
     HAS_PLOTLY_EVENTS = False
-    def plotly_events(*args, **kwargs):  # 더미
+    def plotly_events(*args, **kwargs):
         return []
 
 st.set_page_config(page_title="도시가스 판매량 분석", layout="wide")
 FONT = "Noto Sans KR, Pretendard, Arial, sans-serif"
 
-# ===== 공통 유틸 =====
+# =========================================================
+# 0) 공통 유틸
+# =========================================================
 def to_num(x):
     if isinstance(x, str):
         x = x.replace(",", "")
@@ -72,36 +74,6 @@ def yoy_compare(df, key_cols, value_col, period_col, gran: str):
     out["YoY(%)"] = np.where(out["전년동기"].abs() > 1e-9, out["증감"] / out["전년동기"] * 100, np.nan)
     return out
 
-@st.cache_data(show_spinner=False)
-def read_any(path_or_buf, name_hint=""):
-    """Parquet → CSV → Excel 순으로 빠르게 읽기"""
-    nm = str(name_hint or getattr(path_or_buf, "name", "")).lower()
-
-    # 1) Parquet
-    if nm.endswith(".parquet"):
-        return pd.read_parquet(path_or_buf)
-
-    # 2) CSV
-    if nm.endswith(".csv"):
-        for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
-            try:
-                return pd.read_csv(
-                    path_or_buf,
-                    encoding=enc,
-                    low_memory=False,     # 타입추론 병목 완화
-                    on_bad_lines="skip"   # 깨진 라인 스킵
-                )
-            except Exception:
-                pass
-        return pd.read_csv(path_or_buf, encoding_errors="ignore",
-                           low_memory=False, on_bad_lines="skip")
-
-    # 3) Excel (엔진 고정으로 탐색 비용 최소화)
-    try:
-        return pd.read_excel(path_or_buf, engine="openpyxl")
-    except Exception:
-        return pd.read_excel(path_or_buf)
-
 def find_first(cands):
     for p in cands:
         if os.path.exists(p):
@@ -114,31 +86,91 @@ def list_existing(patterns):
         out += glob.glob(pat)
     return sorted(set(out))
 
-# ===== 설정 =====
+# =========================================================
+# 1) 빠른 입력 파서
+#   - 경로 파일: 캐시 사용
+#   - 업로드 파일: 캐시 금지(해시 병목 방지)
+# =========================================================
+@st.cache_data(show_spinner=False, max_entries=8)
+def _read_any_path_cached(path: str):
+    p = str(path).lower()
+    if p.endswith(".parquet"):
+        return pd.read_parquet(path)
+    if p.endswith(".csv"):
+        for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
+            try:
+                return pd.read_csv(path, encoding=enc, low_memory=False, on_bad_lines="skip")
+            except Exception:
+                pass
+        return pd.read_csv(path, encoding_errors="ignore", low_memory=False, on_bad_lines="skip")
+    try:
+        return pd.read_excel(path, engine="openpyxl")
+    except Exception:
+        return pd.read_excel(path)
+
+def _read_any_uploaded(file_obj):
+    name = getattr(file_obj, "name", "").lower()
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
+
+    if name.endswith(".parquet"):
+        data = file_obj.read()
+        return pd.read_parquet(io.BytesIO(data))
+
+    if name.endswith(".csv"):
+        data = file_obj.read()
+        bio = io.BytesIO(data)
+        for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
+            try:
+                bio.seek(0)
+                return pd.read_csv(bio, encoding=enc, low_memory=False, on_bad_lines="skip")
+            except Exception:
+                pass
+        bio.seek(0)
+        return pd.read_csv(bio, encoding_errors="ignore", low_memory=False, on_bad_lines="skip")
+
+    data = file_obj.read()
+    bio = io.BytesIO(data)
+    try:
+        return pd.read_excel(bio, engine="openpyxl")
+    except Exception:
+        bio.seek(0)
+        return pd.read_excel(bio)
+
+def read_any_auto(src):
+    if isinstance(src, (str, os.PathLike)):
+        return _read_any_path_cached(str(src))
+    return _read_any_uploaded(src)
+
+# =========================================================
+# 2) 설정
+# =========================================================
 CAND_EXTRA = [
     "수송용", "업무용", "연료전지용", "열전용설비용",
     "열병합용", "열병합용1", "열병합용2",
     "일반용", "일반용(1)", "일반용(2)"
 ]
 
-# ===== 데이터 입력(사이드바) =====
 st.sidebar.header("① 데이터 업로드")
 st.sidebar.caption("A: 월별 총괄(주택/산업 합산) · B: 산업용 상세(고객/업종)")
 
-# --- A) 월별 총괄 ---
+# =========================================================
+# 3) A) 월별 총괄
+# =========================================================
 up_overall = st.sidebar.file_uploader("A) 월별 총괄(Parquet/CSV/Excel)", type=["parquet", "csv", "xlsx", "xls"])
 if up_overall:
-    overall_raw = read_any(up_overall, up_overall.name)
+    overall_raw = read_any_auto(up_overall)
     used_overall = up_overall.name
 else:
-    # 저장소 자동 탐색(사용자 폴더에 올린 파일명 기준)
     used_overall = find_first([
         "상품별판매량.parquet", "상품별판매량.csv", "상품별판매량.xlsx",
         "월별총괄.parquet", "월별총괄.csv", "월별총괄.xlsx",
         "overall.parquet", "overall.csv", "overall.xlsx"
     ])
     if used_overall:
-        overall_raw = read_any(used_overall, used_overall)
+        overall_raw = read_any_auto(used_overall)
         st.sidebar.info(f"A 자동 사용: **{used_overall}**")
     else:
         st.info("A(월별 총괄) 파일을 업로드하거나 저장소에 넣어줘. (예: 상품별판매량.csv)")
@@ -179,7 +211,9 @@ overall["주택용"] = overall[["취사용","개별난방","중앙난방","자�
 for nm, col in extra_selects.items():
     overall[nm] = overall[col].apply(to_num)
 
-# --- B) 산업용 상세 ---
+# =========================================================
+# 4) B) 산업용 상세
+# =========================================================
 up_indetail = st.sidebar.file_uploader(
     "B) 산업용 상세(여러 파일 업로드 가능: Parquet/CSV/Excel)",
     type=["parquet", "csv", "xlsx", "xls"],
@@ -190,14 +224,14 @@ if up_indetail:
     frames = []
     for f in up_indetail:
         used_inds.append(f.name)
-        frames.append(read_any(f, f.name))
+        frames.append(read_any_auto(f))
     indetail_raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 else:
     pats = ["가정용외_*.parquet", "가정용외_*.csv", "가정용외_*.xlsx", "가정용외_*.xls"]
     files = list_existing(pats)
     if files:
         used_inds = [os.path.basename(p) for p in files]
-        indetail_raw = pd.concat([read_any(p, p) for p in files], ignore_index=True)
+        indetail_raw = pd.concat([read_any_auto(p) for p in files], ignore_index=True)
         st.sidebar.info("B 자동 병합: " + ", ".join(used_inds[:6]) + (" …" if len(used_inds)>6 else ""))
     else:
         indetail_raw = pd.DataFrame(columns=["청구년월","용도","업종","고객명","사용량"])
@@ -240,16 +274,25 @@ if len(colsB)>0:
 else:
     indetail = pd.DataFrame(columns=["날짜","용도","업종","고객명","사용량"])
 
-# ===== 기간 선택 =====
+# 파일 크기/형태 확인(진단용)
+st.sidebar.caption(f"A shape: {overall_raw.shape} / B shape: {indetail_raw.shape}")
+
+# =========================================================
+# 5) 기간 선택
+# =========================================================
 st.title("📊 도시가스 판매량 분석 — 월/분기/반기/연간 + 산업용 업종/고객")
 date_min = min(overall["날짜"].min(), indetail["날짜"].min()) if len(indetail)>0 else overall["날짜"].min()
 date_max = max(overall["날짜"].max(), indetail["날짜"].max()) if len(indetail)>0 else overall["날짜"].max()
 d1, d2 = st.sidebar.date_input("기간", [pd.to_datetime(date_min), pd.to_datetime(date_max)])
 
-# ===== 탭 =====
+# =========================================================
+# 6) 탭
+# =========================================================
 tab0, tab1, tab2 = st.tabs(["🏠 대시보드","📚 집계","🏭 산업용 집중분석"])
 
-# --- 탭0: 연도별 스택 ---
+# ---------------------------------------------------------
+# 탭0: 연도별 스택
+# ---------------------------------------------------------
 with tab0:
     st.subheader("연도별 용도 누적 스택")
     landing = overall[(overall["날짜"]>=pd.to_datetime(d1)) & (overall["날짜"]<=pd.to_datetime(d2))].copy()
@@ -269,7 +312,9 @@ with tab0:
     st.plotly_chart(fig0, use_container_width=True, config={"displaylogo": False})
     st.dataframe(annual.set_index("연도").style.format("{:,.0f}"), use_container_width=True)
 
-# --- 탭1: 집계 ---
+# ---------------------------------------------------------
+# 탭1: 집계
+# ---------------------------------------------------------
 with tab1:
     st.subheader("집계 — 월/분기/반기/연간 (주택용 / 산업용)")
     gran = st.radio("집계 단위", ["월","분기","반기","연간"], horizontal=True, key="granularity")
@@ -291,37 +336,44 @@ with tab1:
         )
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
-# --- 탭2: 산업용 집중분석 ---
+# ---------------------------------------------------------
+# 탭2: 산업용 집중분석
+# ---------------------------------------------------------
 with tab2:
     st.subheader("산업용 집중분석 — 업종 히트맵 → 고객 Top-N")
+
     if len(indetail) == 0:
         st.info("산업용 상세 파일(B)이 없어 히트맵을 표시할 수 없어.")
         st.stop()
 
     gran_focus = st.radio("기간 단위", ["월","분기","반기","연간"], horizontal=True, key="gran_focus")
-    B = indetail[(indetail["날짜"]>=pd.to_datetime(d1)) & (indetail["날짜"]<=pd.to_datetime(d2))].copy()
 
+    B = indetail[(indetail["날짜"]>=pd.to_datetime(d1)) & (indetail["날짜"]<=pd.to_datetime(d2))].copy()
     if "용도" in B.columns:
         B = B[B["용도"].astype(str).str.contains("산업", na=False)]
     if len(B) == 0:
         st.info("선택한 기간/필터에 산업용 데이터가 없어.")
         st.stop()
 
+    # 초기 렌더 경량화(옵션): 최근 24개월만
+    limit_24m = st.checkbox("초기 24개월로 제한(속도 향상)", value=True)
+    B["Period_dt"] = pd.to_datetime(B["날짜"]).dt.to_period("M").astype(str)
+    if limit_24m:
+        last_date = pd.to_datetime(B["날짜"].max())
+        cutoff = pd.to_datetime(last_date) - pd.DateOffset(months=24)
+        B = B[B["날짜"] >= cutoff]
+
     B["Period"] = as_period_key(B["날짜"], gran_focus)
 
     pivot = B.pivot_table(index="업종", columns="Period", values="사용량", aggfunc="sum").fillna(0)
     pivot = pivot[pivot.columns.sort_values()].sort_index()
-
-    # 컬럼 많을 때 초기 12~24개로 제한하면 렌더가 빨라짐(옵션)
-    if len(pivot.columns) > 30:
-        pivot = pivot.iloc[:, -24:]
 
     Z = pivot.values
     X = pivot.columns.tolist()
     Y = pivot.index.tolist()
     zmid = float(np.nanmean(Z)) if np.isfinite(Z).all() else None
 
-    # 셀에 값 표시
+    # 셀 값(숫자) 텍스트
     text_vals = np.vectorize(lambda v: f"{int(round(v)):,}" if np.isfinite(v) else "")(Z)
 
     heat = go.Figure(data=go.Heatmap(
@@ -335,13 +387,16 @@ with tab2:
         xaxis=dict(title="Period"), yaxis=dict(title="업종"),
         font=dict(family=FONT, size=13), margin=dict(l=70, r=20, t=40, b=40)
     )
+
     clicked = plotly_events(
         heat, click_event=True, hover_event=False, select_event=False,
         override_height=560, override_width="100%"
-    )
-    st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False}) if not HAS_PLOTLY_EVENTS else None
+    ) if HAS_PLOTLY_EVENTS else []
 
-    # 클릭 없거나 모듈이 없으면 드롭다운으로 대체
+    if not HAS_PLOTLY_EVENTS:
+        st.plotly_chart(heat, use_container_width=True, config={"displaylogo": False})
+
+    # 클릭 없으면 드롭다운 대체
     if not clicked:
         sel_ind = st.selectbox("업종 선택", Y) if len(Y) else None
         sel_period = st.selectbox("기간 선택", X) if len(X) else None
@@ -352,21 +407,30 @@ with tab2:
 
     if sel_ind and sel_period:
         st.markdown(f"**선택 업종:** `{sel_ind}` · **선택 기간:** `{sel_period}`")
+
         yo = yoy_compare(B[B["업종"] == sel_ind], ["업종","고객명"], "사용량", "Period", gran_focus)
         yo_sel = yo[yo["Period"] == sel_period].copy().sort_values("사용량", ascending=False)
+
+        # 점유율 추가(선택 업종·기간 합 대비)
+        total_sel = float(yo_sel["사용량"].sum()) if len(yo_sel) else 0.0
+        if total_sel > 0:
+            yo_sel["점유율(%)"] = yo_sel["사용량"] / total_sel * 100
+        else:
+            yo_sel["점유율(%)"] = np.nan
 
         yo_sel["사용량"]   = yo_sel["사용량"].round(0)
         yo_sel["전년동기"] = yo_sel["전년동기"].round(0)
         yo_sel["증감"]     = yo_sel["증감"].round(0)
         yo_sel["YoY(%)"]  = yo_sel["YoY(%)"].round(1)
+        yo_sel["점유율(%)"] = yo_sel["점유율(%)"].round(1)
 
         top_n = st.slider("상위 N", 5, 100, 20, step=5)
-        view = yo_sel.head(top_n)[["고객명","사용량","전년동기","증감","YoY(%)"]].reset_index(drop=True)
+        view = yo_sel.head(top_n)[["고객명","사용량","전년동기","증감","YoY(%)","점유율(%)"]].reset_index(drop=True)
 
         g1, g2 = st.columns([1.4, 1.6])
         with g1:
             st.dataframe(
-                view.style.format({"사용량":"{:,.0f}","전년동기":"{:,.0f}","증감":"{:+,.0f}","YoY(%)":"{:+,.1f}"}),
+                view.style.format({"사용량":"{:,.0f}","전년동기":"{:,.0f}","증감":"{:+,.0f}","YoY(%)":"{:+,.1f}","점유율(%)":"{:.1f}"}),
                 use_container_width=True, height=520
             )
             st.download_button(
@@ -392,7 +456,9 @@ with tab2:
     else:
         st.info("히트맵 셀을 클릭(또는 우측 드롭다운으로 선택)하면 고객 Top-N과 막대그래프가 표시돼.")
 
-# ===== 사용 파일 확인 =====
+# =========================================================
+# 7) 사용 파일 확인
+# =========================================================
 with st.expander("🔎 분석에 사용된 원천 파일"):
     if 'used_overall' in locals() and used_overall:
         st.write(f"A(월별 총괄): **{used_overall}**")
