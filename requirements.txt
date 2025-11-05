@@ -1,7 +1,5 @@
-# ---- hard pins (wheels only) ----
-streamlit==1.31.1
-pandas==2.2.2 --only-binary=:all:
-numpy==1.26.4 --only-binary=:all:
-pyarrow==16.1.0 --only-binary=:all:
+streamlit==1.33.0
+pandas==2.2.3
+pyarrow==16.1.0
 plotly==5.22.0
-openpyxl==3.1.5
+streamlit-plotly-events==0.0.6
