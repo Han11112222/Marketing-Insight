@@ -3,4 +3,3 @@ pandas==2.2.2
 numpy==1.26.4
 pyarrow==16.1.0
 plotly==5.22.0
-streamlit-plotly-events==0.0.6   # ← 새로 추가 (클릭 기능 쓰려면)
