@@ -6,22 +6,14 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-import time
 
-# ── 선택 모듈(없어도 앱 구동)
+# 클릭이벤트 모듈: 없으면 화면만 뜨게 우회
 try:
     from streamlit_plotly_events import plotly_events
     HAS_PLOTLY_EVENTS = True
 except Exception:
     HAS_PLOTLY_EVENTS = False
-    def plotly_events(*args, **kwargs):
-        return []
 
-st.set_page_config(page_title="도시가스 판매량 분석", layout="wide")
-FONT = "Noto Sans KR, Pretendard, Arial, sans-serif"
-
-CAND_EXTRA = ["수송용", "업무용", "연료전지용", "열전용설비용",
-              "열병합용", "열병합용1", "열병합용2", "일반용", "일반용(1)", "일반용(2)"]
 
 # ───────────────────────── 유틸 ─────────────────────────
 def to_num(x):
